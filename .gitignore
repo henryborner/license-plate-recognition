@@ -1,0 +1,40 @@
+# 虚拟环境
+venv/
+env/
+ENV/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.dll
+
+# 数据库文件（如果你不想上传数据库）
+*.db
+*.sqlite3
+
+# 上传的图片文件夹
+uploads/
+# 如果你想保留 uploads 文件夹的结构但不上传里面的文件，可以写 uploads/*
+
+# 模型文件（如果你已经打包进 exe，或者不想上传原始模型）
+# models/PP-OCRv4_mobile_det/
+# models/PP-OCRv4_mobile_rec/
+# 如果 models 里只有这两个文件夹，可以只写 models/ 但会保留空目录
+
+# PyInstaller 打包产物
+build/
+dist/
+*.spec
+
+# IDE 配置文件
+.vscode/
+.idea/
+
+# 系统临时文件
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
