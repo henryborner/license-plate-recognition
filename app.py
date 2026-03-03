@@ -15,14 +15,18 @@ import cv2
 import numpy as np
 from paddleocr import PaddleOCR
 
-# ========== 日志配置 ==========
-handler = RotatingFileHandler('app.log', maxBytes=10*1024*1024, backupCount=5)
-logging.basicConfig(handlers=[handler], level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s')
-# 同时将 print 输出重定向到日志
-sys.stdout = open('app.log', 'a')
-sys.stderr = open('app.log', 'a')
-# =============================
+# ========== 日志配置（同时输出到文件和控制台）==========
+log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+log_file = RotatingFileHandler('app.log', maxBytes=10*1024*1024, backupCount=5)
+log_file.setFormatter(log_formatter)
+log_console = logging.StreamHandler(sys.stdout)
+log_console.setFormatter(log_formatter)
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+logger.addHandler(log_file)
+logger.addHandler(log_console)
+# =====================================================
 
 # 基础路径处理（兼容打包后）
 def get_base_path():
@@ -44,11 +48,17 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 if getattr(sys, 'frozen', False):
     app.template_folder = os.path.join(sys._MEIPASS, 'templates')
 
-# 车牌正则
+# 车牌正则（只匹配字母数字，点号将被清理）
 PLATE_PATTERN = re.compile(
     r'^[京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵粤青藏川宁琼使领][A-Z][A-Z0-9]{5,6}$'
 )
 
+def is_plate(text):
+    """清理点号、空格、短横线后再匹配"""
+    cleaned = text.replace('·', '').replace('-', '').replace(' ', '')
+    return PLATE_PATTERN.match(cleaned) is not None
+
+# ========== 数据库操作 ==========
 def get_db():
     db = getattr(g, '_database', None)
     if db is None:
@@ -79,114 +89,6 @@ def init_db():
         ''')
         db.commit()
 
-def is_plate(text):
-    return PLATE_PATTERN.match(text) is not None
-
-def recognize_plate(image_path, max_retries=2, model_choice='mobile'):
-    """识别车牌，支持模型选择和图像增强"""
-    img = cv2.imread(image_path)
-    if img is None:
-        print(f"图片读取失败: {image_path}")
-        return None, 0.0
-
-    # ===== 可选：图像增强（锐化 + CLAHE）—— 改善模糊图片 =====
-    # 如果不需要，可以注释掉此块
-    try:
-        # 锐化
-        kernel_sharpen = np.array([[0, -1, 0],
-                                   [-1, 5, -1],
-                                   [0, -1, 0]])
-        img = cv2.filter2D(img, -1, kernel_sharpen)
-
-        # CLAHE 对比度增强
-        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-        l = clahe.apply(l)
-        lab = cv2.merge((l, a, b))
-        img = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-        print("图像增强已应用")
-    except Exception as e:
-        print(f"图像增强失败: {e}")
-
-    # ===== 图像缩放（为提高远距离小字符识别率，已注释掉）=====
-    # h, w = img.shape[:2]
-    # max_len = 2000
-    # if max(h, w) > max_len:
-    #     scale = max_len / max(h, w)
-    #     new_w, new_h = int(w * scale), int(h * scale)
-    #     img = cv2.resize(img, (new_w, new_h))
-    #     print(f"图片已缩放: {w}x{h} -> {new_w}x{new_h}")
-    # =======================================================
-
-    # 根据模型选择确定模型名称
-    if model_choice == 'server':
-        det_model_name = "PP-OCRv5_server_det"
-        rec_model_name = "PP-OCRv5_server_rec"
-    else:  # mobile
-        det_model_name = "PP-OCRv4_mobile_det"
-        rec_model_name = "PP-OCRv4_mobile_rec"
-
-    # 确定模型路径（打包后从临时目录加载）
-    if getattr(sys, 'frozen', False):
-        base_model_path = os.path.join(sys._MEIPASS, 'models')
-    else:
-        base_model_path = os.path.join(os.path.dirname(__file__), 'models')
-
-    det_model_dir = os.path.join(base_model_path, det_model_name)
-    rec_model_dir = os.path.join(base_model_path, rec_model_name)
-
-    # 检查路径是否存在
-    if not os.path.isdir(det_model_dir):
-        print(f"错误: 检测模型目录不存在 {det_model_dir}")
-        return None, 0.0
-    if not os.path.isdir(rec_model_dir):
-        print(f"错误: 识别模型目录不存在 {rec_model_dir}")
-        return None, 0.0
-
-    # 创建 OCR 实例
-    ocr = PaddleOCR(
-        use_doc_orientation_classify=False,
-        use_doc_unwarping=False,
-        use_textline_orientation=False,
-        lang='ch',
-        text_detection_model_dir=det_model_dir,
-        text_recognition_model_dir=rec_model_dir,
-        text_detection_model_name=det_model_name,
-        text_recognition_model_name=rec_model_name
-    )
-
-    for attempt in range(max_retries):
-        try:
-            results = ocr.predict(img)
-            if results:
-                res_json_full = results[0].json
-                res_content = res_json_full.get('res', {})
-                texts = res_content.get('rec_texts', [])
-                scores = res_content.get('rec_scores', [])
-
-                for text, conf in zip(texts, scores):
-                    text_clean = text.replace(' ', '').replace('·', '').replace('-', '')
-                    if is_plate(text_clean):
-                        return text_clean, conf
-
-            if attempt < max_retries - 1:
-                print(f"第{attempt+1}次识别未成功，重试中...")
-                time.sleep(0.5)
-            else:
-                print(f"经过{max_retries}次尝试仍未识别到车牌")
-        except Exception as e:
-            print(f"OCR预测异常 (尝试 {attempt+1}/{max_retries})")
-            print(f"异常类型: {type(e).__name__}")
-            print(f"异常信息: {e}")
-            traceback.print_exc()
-            gc.collect()
-            if attempt < max_retries - 1:
-                time.sleep(1)
-            else:
-                return None, 0.0
-    return None, 0.0
-
 def get_current_vehicles():
     db = get_db()
     cursor = db.cursor()
@@ -208,6 +110,87 @@ def get_recent_records(limit=20):
         LIMIT ?
     ''', (limit,))
     return cursor.fetchall()
+# =================================
+
+# ========== 核心识别函数（每次新建OCR实例）==========
+def recognize_plate(image_path, max_retries=2, model_choice='mobile'):
+    logger.info(f"Recognizing: {image_path}, model: {model_choice}, max_retries: {max_retries}")
+
+    img = cv2.imread(image_path)
+    if img is None:
+        logger.error(f"Failed to read image: {image_path}")
+        return None, 0.0
+
+    # 根据模型选择确定模型名称
+    if model_choice == 'server':
+        det_model_name = "PP-OCRv5_server_det"
+        rec_model_name = "PP-OCRv5_server_rec"
+    else:  # mobile
+        det_model_name = "PP-OCRv4_mobile_det"
+        rec_model_name = "PP-OCRv4_mobile_rec"
+
+    # 确定模型路径
+    if getattr(sys, 'frozen', False):
+        base_model_path = os.path.join(sys._MEIPASS, 'models')
+    else:
+        base_model_path = os.path.join(os.path.dirname(__file__), 'models')
+
+    det_model_dir = os.path.join(base_model_path, det_model_name)
+    rec_model_dir = os.path.join(base_model_path, rec_model_name)
+
+    if not os.path.isdir(det_model_dir):
+        logger.error(f"Detection model dir not found: {det_model_dir}")
+        return None, 0.0
+    if not os.path.isdir(rec_model_dir):
+        logger.error(f"Recognition model dir not found: {rec_model_dir}")
+        return None, 0.0
+
+    ocr = PaddleOCR(
+        use_doc_orientation_classify=False,
+        use_doc_unwarping=False,
+        use_textline_orientation=False,
+        lang='ch',
+        text_detection_model_dir=det_model_dir,
+        text_recognition_model_dir=rec_model_dir,
+        text_detection_model_name=det_model_name,
+        text_recognition_model_name=rec_model_name
+    )
+
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"Attempt {attempt+1}/{max_retries}")
+            results = ocr.predict(img)
+
+            if results:
+                res_json_full = results[0].json
+                res_content = res_json_full.get('res', {})
+                texts = res_content.get('rec_texts', [])
+                scores = res_content.get('rec_scores', [])
+
+                logger.info(f"Detected {len(texts)} text blocks")
+                for text, conf in zip(texts, scores):
+                    text_clean = text.replace(' ', '').replace('·', '').replace('-', '')
+                    if is_plate(text_clean):
+                        logger.info(f"Matched plate: {text} (cleaned: {text_clean}, confidence: {conf:.4f})")
+                        return text_clean, conf
+
+            if attempt < max_retries - 1:
+                logger.info(f"Attempt {attempt+1} failed, retrying...")
+                time.sleep(0.5)
+            else:
+                logger.info(f"All {max_retries} attempts failed, no plate detected")
+        except Exception as e:
+            logger.error(f"OCR exception (attempt {attempt+1}/{max_retries})")
+            logger.error(f"Exception type: {type(e).__name__}")
+            logger.error(f"Exception info: {e}")
+            logger.error(traceback.format_exc())
+            gc.collect()
+            if attempt < max_retries - 1:
+                time.sleep(1)
+            else:
+                return None, 0.0
+    return None, 0.0
+# ===================================================
 
 # ========== 退出路由 ==========
 @app.route('/shutdown', methods=['POST'])
@@ -236,7 +219,10 @@ def entry():
     if file.filename == '':
         return '文件名为空'
 
-    filename = datetime.datetime.now().strftime('%Y%m%d_%H%M%S_') + file.filename
+    # 获取文件扩展名（例如 '.jpg'）
+    ext = file.filename.rsplit('.', 1)[-1] if '.' in file.filename else 'jpg'
+    # 生成安全文件名：时间戳 + 扩展名
+    filename = datetime.datetime.now().strftime('%Y%m%d_%H%M%S') + '.' + ext
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
     file.save(filepath)
 
@@ -257,7 +243,7 @@ def entry():
         ''', (plate,))
         existing = cursor.fetchone()
         if existing:
-            message = f'❌ 车辆 {plate} 尚未出场，无法重复入场'
+            message = f'[失败] 车辆 {plate} 尚未出场，无法重复入场'
         else:
             now = datetime.datetime.now().replace(microsecond=0)
             cursor.execute('''
@@ -265,7 +251,7 @@ def entry():
                 VALUES (?, ?, ?)
             ''', (plate, now, filename))
             db.commit()
-            message = f'✅ 入场记录成功：{plate} (置信度 {conf:.2f})'
+            message = f'[成功] 入场记录成功：{plate} (置信度 {conf:.2f})'
     else:
         message = '未识别到车牌，无法记录入场'
 
@@ -282,7 +268,10 @@ def exit():
     if file.filename == '':
         return '文件名为空'
 
-    filename = datetime.datetime.now().strftime('%Y%m%d_%H%M%S_') + file.filename
+    # 获取文件扩展名（例如 '.jpg'）
+    ext = file.filename.rsplit('.', 1)[-1] if '.' in file.filename else 'jpg'
+    # 生成安全文件名：时间戳 + 扩展名
+    filename = datetime.datetime.now().strftime('%Y%m%d_%H%M%S') + '.' + ext
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
     file.save(filepath)
 
