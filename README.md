@@ -1,0 +1,1 @@
+这是个简单的车牌识别示例程序，采用Python、SQLite和Html，原理是Transform，采用百度飞桨PaddleOCR，识别率极高，可作为一个有趣的示例。
