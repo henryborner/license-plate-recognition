@@ -1,5 +1,6 @@
 import os
 import sys
+import logging
 import time
 import traceback
 import re
@@ -11,6 +12,12 @@ import webbrowser
 from flask import Flask, request, render_template, g, session, jsonify
 import cv2
 from paddleocr import PaddleOCR
+
+logging.basicConfig(filename='app.log', level=logging.INFO, 
+                    format='%(asctime)s - %(levelname)s - %(message)s')
+# 同时将 print 输出重定向到日志
+sys.stdout = open('app.log', 'a')
+sys.stderr = open('app.log', 'a')
 
 # 基础路径处理（兼容打包后）
 def get_base_path():
